@@ -22,8 +22,9 @@ repos:
 
 -   repo: local
     hooks:
-    -   id: git tag
+    -   id: tag
         name: Create git tag if poetry version was updated
         entry: sh -c 'git tag v$(poetry version -s) || exit 0'
-        files: "pyproject.toml"
+        always_run: true
+        stages: [ post-commit ]
         language: system

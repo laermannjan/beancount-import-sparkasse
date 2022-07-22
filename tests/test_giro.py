@@ -2,12 +2,12 @@
 
 from datetime import datetime
 
-from pytest import fixture
+from pytest import fixture, yield_fixture
 
 from beancount_import_sparkasse.giro import DEFAULT_FIELDS, SparkasseCSVCAMTImporter
 
 
-@fixture
+@yield_fixture
 def csv_camt_file(tmp_path):
     csv_file = tmp_path / "sample-camt.csv"
 
@@ -45,7 +45,8 @@ def csv_camt_file(tmp_path):
         "TUBDDEDD";"-34,00";"EUR";"Umsatz gebucht"',
     ]
     csv_file.write_text("\n".join(rows))
-    return csv_file
+    with csv_file.open() as f:
+        yield f
 
 
 @fixture
@@ -69,6 +70,9 @@ def test_extract_date(default_importer, csv_camt_file):
 
 
 def test_extract_exclude_literal(default_importer, csv_camt_file):
+    default_importer.ref_excluded_regex = [
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2} Debitk\.0 \d{4}-\d{2}"
+    ]  # EC-Karten Zahlung
     extracted_transactions = default_importer.extract(csv_camt_file)
     assert extracted_transactions[0].narration == ""
 
@@ -82,16 +86,16 @@ def test_extract_parse_paypal(default_importer, csv_camt_file):
 def test_extract_parse_audible(default_importer, csv_camt_file):
     extracted_transactions = default_importer.extract(csv_camt_file)
     assert extracted_transactions[1].payee == "Audible Gmbh"
-    assert extracted_transactions[1].narration == "order_id: D01-4980510-3762206"
+    assert extracted_transactions[1].meta["order_number"] == "D01-4242420-1337337"
 
 
 def test_extract_parse_amazon(default_importer, csv_camt_file):
     extracted_transactions = default_importer.extract(csv_camt_file)
     assert extracted_transactions[3].payee == "Amazon.de"
-    assert extracted_transactions[3].narration == "order_id: 304-4813206-9870721"
+    assert extracted_transactions[3].meta["order_number"] == "304-4242420-1337337"
 
 
 def test_extract_parse_amazon_prime(default_importer, csv_camt_file):
     extracted_transactions = default_importer.extract(csv_camt_file)
     assert extracted_transactions[4].payee == "AMZNPrime DE"
-    assert extracted_transactions[4].narration == "order_id: D01-6623628-2319009"
+    assert extracted_transactions[4].meta["order_number"] == "D01-4242420-1337337"

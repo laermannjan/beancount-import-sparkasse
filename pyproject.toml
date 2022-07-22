@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "beancount-import-sparkasse"
-version = "0.1.0-alpha.0"
+version = "0.2.0-beta.0"
 description = "Beancount importer plugin for Sparkasse CSV-CAMT exports"
 authors = ["Jan Laermann <laermannjan@gmail.com>"]
 license = "MIT"
@@ -8,7 +8,7 @@ readme = "README.md"
 repository = "https://github.com/laermannjan/beancount-import-sparkasse"
 keywords = ["beancount", "plain-text-accounting", "ledger", "sparkasse"]
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Environment :: Plugins",
     "Intended Audience :: Developers",

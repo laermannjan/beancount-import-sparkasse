@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Sequence
 
+from beancount.core import flags
 from beancount.core.amount import Amount
 from beancount.core.data import EMPTY_SET, Decimal, Posting, Transaction, new_metadata
 from beancount.ingest.importer import ImporterProtocol
@@ -33,6 +34,29 @@ DEFAULT_FIELDS = OrderedDict(
 
 
 @dataclass
+class CsvTxn:
+    owner_iban: str
+    booking_date: datetime
+    posting_type: str
+    reference: str
+    payee_name: str
+    payee_iban: str
+    payee_bic: str
+    amount: Decimal
+    currency: str
+    meta_auto_fields: Sequence[str]
+    meta: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self):
+        self.update_meta()
+
+    def update_meta(self):
+        for key in self.meta_auto_fields:
+            if field_val := getattr(self, key):
+                self.meta[key] = field_val
+
+
+@dataclass
 class SparkasseCSVCAMTImporter(ImporterProtocol):
     """Beancount importer for CSV-CAMT exports of the German Sparkasse."""
 
@@ -42,17 +66,16 @@ class SparkasseCSVCAMTImporter(ImporterProtocol):
     date_format: str = "%d.%m.%y"
     file_encoding: str = "ISO-8859-1"
     fields: OrderedDict[str, str] = field(default_factory=lambda: DEFAULT_FIELDS)
-    meta_payee_iban: bool = True
+    meta_auto_fields: Sequence[str] = ("payee_iban", "posting_type")
     meta_via: bool = True
     meta_order_id: bool = True
-    meta_posting_type: bool = True
     clean_strings: bool = True
     payee_sumup_regex: str = r"SumUp \.(\w.*//.+/.+)/\d+"
     ref_paypal_regex: str = r"Ihr Einkauf bei (\w+)"
     ref_amazon_order_regex: str = r"(\w\d{2}-\d{7}-\d{7}) (\w.+) \w{16}"
     ref_excluded_literal: Sequence[str] = ()
     ref_excluded_regex: Sequence[str] = ()
-    add_dummy_expense: bool = True
+    dummy_account: str = "Expenses:Dummy"
 
     def __post_init__(self):
         self.expected_header = ";".join(
@@ -63,7 +86,7 @@ class SparkasseCSVCAMTImporter(ImporterProtocol):
         """Removes German thousands separator and converts decimal point to US."""
         return Decimal(amount.replace(".", "").replace(",", "."))
 
-    def _parse_paypal(self, txn) -> None:
+    def _parse_paypal(self, txn: CsvTxn) -> None:
         """Retrieves the payee/debitor behind a PayPal transaction.
 
         Checks whether the stated payee is "PayPal".
@@ -76,38 +99,38 @@ class SparkasseCSVCAMTImporter(ImporterProtocol):
         In the same case and if `self.meta_via` is True, a "via" meta tag
         will also be added, noting that the transaction was wired via paypal.
         """
-        if txn["payee"].startswith("PayPal"):
-            match = re.search(self.ref_paypal_regex, txn["narration"])
+        if txn.payee_name.startswith("PayPal"):
+            match = re.search(self.ref_paypal_regex, txn.reference)
             if match:
                 if self.meta_via:
-                    txn["meta"]["via"] = "paypal"
-                txn["payee"] = match.group(1).strip()
-                txn["narration"] = ""
+                    txn.meta["via"] = "paypal"
+                txn.payee_name = match.group(1).strip()
+                txn.reference = ""
 
-    def _parse_sumup(self, txn) -> None:
-        match = re.search(self.payee_sumup_regex, txn["payee"])
+    def _parse_sumup(self, txn: CsvTxn) -> None:
+        match = re.search(self.payee_sumup_regex, txn.payee_name)
         if match:
             if self.meta_via:
-                txn["meta"]["via"] = "sumup"
-            txn["payee"] = match.group(1)
-            txn["narration"] = ""
+                txn.meta["via"] = "sumup"
+            txn.payee_name = match.group(1)
+            txn.reference = ""
 
-    def _parse_amazon(self, txn) -> None:
+    def _parse_amazon(self, txn: CsvTxn) -> None:
         """Parse referece for order id and amazon name"""
-        match = re.search(self.ref_amazon_order_regex, txn["narration"])
+        match = re.search(self.ref_amazon_order_regex, txn.reference)
         if match:
-            txn["meta"]["order_number"] = match.group(1)
-            txn["payee"] = match.group(2)
+            txn.meta["order_number"] = match.group(1)
+            txn.payee_name = match.group(2)
 
-    def _excluded_narration_maybe(self, txn) -> None:
+    def _excluded_narration_maybe(self, txn: CsvTxn) -> None:
         for excluded_str in self.ref_excluded_literal:
-            if excluded_str.lower() in txn["narration"].lower():
-                txn["narration"] = ""
+            if excluded_str.lower() in txn.reference.lower():
+                txn.reference = ""
                 return
 
         for excluded_regex in self.ref_excluded_regex:
-            if re.search(excluded_regex, txn["narration"]):
-                txn["narration"] = ""
+            if re.search(excluded_regex, txn.reference):
+                txn.reference = ""
                 return
 
     def _clean(self, s: str) -> str:
@@ -124,6 +147,46 @@ class SparkasseCSVCAMTImporter(ImporterProtocol):
         with open(file.name, encoding=self.file_encoding) as f:
             header = f.readline().strip()
         return header.lower() == self.expected_header.lower()
+
+    def _make_transaction(
+        self, txn: CsvTxn, fname: str, lineno: int, flag: str
+    ) -> Transaction:
+        postings = [
+            Posting(
+                account=self.account,
+                units=Amount(
+                    number=txn.amount,
+                    currency=txn.currency,
+                ),
+                cost=None,
+                price=None,
+                flag=None,
+                meta=None,
+            ),
+        ]
+        if self.dummy_account:
+            postings.append(
+                Posting(
+                    account=self.dummy_account,
+                    units=None,
+                    cost=None,
+                    price=None,
+                    flag=flags.FLAG_WARNING,
+                    meta=None,
+                ),
+            )
+
+        t = Transaction(
+            meta=new_metadata(filename=fname, lineno=lineno, kvlist=txn.meta),
+            date=txn.booking_date,
+            flag=flag,
+            payee=txn.payee_name,
+            narration=txn.reference,
+            tags=EMPTY_SET,
+            links=EMPTY_SET,
+            postings=postings,
+        )
+        return t
 
     def extract(self, file, existing_entries=None):
         """Extract transactions from a file.
@@ -158,66 +221,39 @@ class SparkasseCSVCAMTImporter(ImporterProtocol):
                     continue
 
                 # base values
-                txn_kwargs = dict(
-                    meta=dict(),
-                    date=datetime.strptime(
+                csv_txn = CsvTxn(
+                    owner_iban=txn["account"],
+                    booking_date=datetime.strptime(
                         txn["booking_date"], self.date_format
                     ).date(),
-                    payee=txn["payee_name"],
-                    narration=txn["reference"],
+                    posting_type=txn["posting_type"],
+                    reference=txn["reference"],
+                    payee_name=txn["payee_name"],
+                    payee_iban=txn["payee_iban"],
+                    payee_bic=txn["payee_bic"],
+                    amount=self._fmt_amount(txn["amount"]),
+                    currency=txn["currency"],
+                    meta_auto_fields=self.meta_auto_fields,
                 )
 
                 # augmentation
-                if self.meta_payee_iban and txn["payee_iban"]:
-                    txn_kwargs["meta"]["payee_iban"] = txn["payee_iban"]
 
                 if self.payee_sumup_regex:
-                    self._parse_sumup(txn=txn_kwargs)
+                    self._parse_sumup(txn=csv_txn)
 
                 if self.ref_paypal_regex:
-                    self._parse_paypal(txn=txn_kwargs)
+                    self._parse_paypal(txn=csv_txn)
 
                 if self.ref_amazon_order_regex:
-                    self._parse_amazon(txn=txn_kwargs)
+                    self._parse_amazon(txn=csv_txn)
 
-                self._excluded_narration_maybe(txn=txn_kwargs)
+                self._excluded_narration_maybe(txn=csv_txn)
 
-                if self.meta_posting_type and txn["posting_type"]:
-                    txn_kwargs["meta"]["posting_type"] = txn["posting_type"]
-
-                extracted_txn = Transaction(
-                    meta=new_metadata(
-                        filename=file.name, lineno=i + 1, kvlist=txn_kwargs["meta"]
-                    ),
-                    date=txn_kwargs["date"],
-                    flag=self.FLAG,
-                    payee=self._clean(txn_kwargs["payee"]),
-                    narration=self._clean(txn_kwargs["narration"]),
-                    tags=EMPTY_SET,
-                    links=EMPTY_SET,
-                    postings=[
-                        Posting(
-                            account=self.account,
-                            units=Amount(
-                                number=self._fmt_amount(txn["amount"]),
-                                currency=txn["currency"],
-                            ),
-                            cost=None,
-                            price=None,
-                            flag=None,
-                            meta=None,
-                        ),
-                        Posting(
-                            account="Expenses:Dummy",
-                            units=None,
-                            cost=None,
-                            price=None,
-                            flag=None,
-                            meta=None,
-                        ),
-                    ],
+                extracted_transactions.append(
+                    self._make_transaction(
+                        txn=csv_txn, fname=file.name, lineno=i, flag=self.FLAG
+                    )
                 )
-                extracted_transactions.append(extracted_txn)
         return extracted_transactions
 
     def file_account(self, file):

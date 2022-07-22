@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "beancount-import-sparkasse"
-version = "0.0.1-alpha.0"
+version = "0.1.0-alpha.0"
 description = "Beancount importer plugin for Sparkasse CSV-CAMT exports"
 authors = ["Jan Laermann <laermannjan@gmail.com>"]
 license = "MIT"

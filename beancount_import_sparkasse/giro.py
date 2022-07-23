@@ -5,12 +5,12 @@ import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 
-from beancount.core.amount import Amount
-from beancount.core.data import EMPTY_SET, Decimal, Posting, Transaction, new_metadata
 from beancount.ingest.importer import ImporterProtocol
 
-from beancount_import_sparkasse.models import TXN
+from beancount_import_sparkasse.models import TXN, Importer
+from beancount_import_sparkasse.utils import make_transaction
 
 DEFAULT_FIELDS = (
     "Auftragskonto",
@@ -34,7 +34,7 @@ DEFAULT_FIELDS = (
 
 
 @dataclass
-class SparkasseCSVCAMTImporter(ImporterProtocol):
+class SparkasseCSVCAMTImporter(ImporterProtocol, Importer):
     """Beancount importer for CSV-CAMT exports of the German Sparkasse."""
 
     iban: str
@@ -84,42 +84,6 @@ class SparkasseCSVCAMTImporter(ImporterProtocol):
         )
         return txn
 
-    def _make_posting(
-        self,
-        amount: Decimal | None,
-        currency: str | None,
-        account: str | None = None,
-        flag: str | None = None,
-    ):
-        posting = Posting(
-            account=account if account else self.account,
-            units=Amount(
-                number=amount, currency=currency if currency else self.currency
-            ),
-            cost=None,
-            price=None,
-            flag=flag,
-            meta=None,
-        )
-        return posting
-
-    def _make_transaction(
-        self, txn: TXN, fname: str, lineno: int, flag: str
-    ) -> Transaction:
-        postings = [self._make_posting(amount=txn.amount, currency=txn.currency)]
-
-        t = Transaction(
-            meta=new_metadata(filename=fname, lineno=lineno, kvlist=txn.meta),
-            date=txn.booking_date,
-            flag=flag,
-            payee=txn.payee_name,
-            narration=txn.reference,
-            tags=EMPTY_SET,
-            links=EMPTY_SET,
-            postings=postings,
-        )
-        return t
-
     def extract(self, file, existing_entries=None):
         """Extract transactions from a file.
 
@@ -152,8 +116,12 @@ class SparkasseCSVCAMTImporter(ImporterProtocol):
                     cb(txn)
 
                 extracted_transactions.append(
-                    self._make_transaction(
-                        txn=txn, fname=file.name, lineno=i, flag=self.FLAG
+                    make_transaction(
+                        account=self.account,
+                        txn=txn,
+                        fname=file.name,
+                        lineno=i,
+                        flag=self.FLAG,
                     )
                 )
         return extracted_transactions

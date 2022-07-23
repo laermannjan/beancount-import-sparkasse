@@ -2,58 +2,35 @@
 
 import csv
 import re
-from collections import OrderedDict
-from dataclasses import dataclass, field
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Sequence
 
-from beancount.core import flags
 from beancount.core.amount import Amount
 from beancount.core.data import EMPTY_SET, Decimal, Posting, Transaction, new_metadata
 from beancount.ingest.importer import ImporterProtocol
 
-DEFAULT_FIELDS = OrderedDict(
-    account="Auftragskonto",
-    booking_date="Buchungstag",
-    value_date="Valutadatum",
-    posting_type="Buchungstext",
-    reference="Verwendungszweck",
-    creditor="Glaeubiger ID",
-    mandate_reference="Mandatsreferenz",
-    customer_refernce="Kundenreferenz (End-to-End)",
-    bulk_reference="Sammlerreferenz",
-    debit_charge_original_amount="Lastschrift Ursprungsbetrag",
-    reimbursement_return_debit="Auslagenersatz Ruecklastschrift",
-    payee_name="Beguenstigter/Zahlungspflichtiger",
-    payee_iban="Kontonummer/IBAN",
-    payee_bic="BIC (SWIFT-Code)",
-    amount="Betrag",
-    currency="Waehrung",
-    info="Info",
+from beancount_import_sparkasse.models import TXN
+
+DEFAULT_FIELDS = (
+    "Auftragskonto",
+    "Buchungstag",
+    "Valutadatum",
+    "Buchungstext",
+    "Verwendungszweck",
+    "Glaeubiger ID",
+    "Mandatsreferenz",
+    "Kundenreferenz (End-to-End)",
+    "Sammlerreferenz",
+    "Lastschrift Ursprungsbetrag",
+    "Auslagenersatz Ruecklastschrift",
+    "Beguenstigter/Zahlungspflichtiger",
+    "Kontonummer/IBAN",
+    "BIC (SWIFT-Code)",
+    "Betrag",
+    "Waehrung",
+    "Info",
 )
-
-
-@dataclass
-class CsvTxn:
-    owner_iban: str
-    booking_date: datetime
-    posting_type: str
-    reference: str
-    payee_name: str
-    payee_iban: str
-    payee_bic: str
-    amount: Decimal
-    currency: str
-    meta_auto_fields: Sequence[str]
-    meta: dict[str, str] = field(default_factory=dict)
-
-    def __post_init__(self):
-        self.update_meta()
-
-    def update_meta(self):
-        for key in self.meta_auto_fields:
-            if field_val := getattr(self, key):
-                self.meta[key] = field_val
 
 
 @dataclass
@@ -65,76 +42,13 @@ class SparkasseCSVCAMTImporter(ImporterProtocol):
     currency: str = "EUR"
     date_format: str = "%d.%m.%y"
     file_encoding: str = "ISO-8859-1"
-    fields: OrderedDict[str, str] = field(default_factory=lambda: DEFAULT_FIELDS)
-    meta_auto_fields: Sequence[str] = ("payee_iban", "posting_type")
-    meta_via: bool = True
-    meta_order_id: bool = True
-    clean_strings: bool = True
-    payee_sumup_regex: str = r"SumUp \.(\w.*//.+/.+)/\d+"
-    ref_paypal_regex: str = r"Ihr Einkauf bei (\w+)"
-    ref_amazon_order_regex: str = r"(\w\d{2}-\d{7}-\d{7}) (\w.+) \w{16}"
-    ref_excluded_literal: Sequence[str] = ()
-    ref_excluded_regex: Sequence[str] = ()
+    fields: Sequence[str] = DEFAULT_FIELDS
+    process_callbacks: Sequence[Callable[[TXN], None]] = ()
     dummy_account: str = "Expenses:Dummy"
-
-    def __post_init__(self):
-        self.expected_header = ";".join(
-            [f'"{field}"' for field in self.fields.values()]
-        )
 
     def _fmt_amount(self, amount: str) -> Decimal:
         """Removes German thousands separator and converts decimal point to US."""
         return Decimal(amount.replace(".", "").replace(",", "."))
-
-    def _parse_paypal(self, txn: CsvTxn) -> None:
-        """Retrieves the payee/debitor behind a PayPal transaction.
-
-        Checks whether the stated payee is "PayPal".
-        If the transaction reference also contains the
-        `self.paypal_reference_identifier` string, the actual
-        payee/debitor is the next string slice.
-
-        This works as paypal usually uses standardized references like:
-        "somehting . PP 3925 PP somthing your order at payee_name"
-        In the same case and if `self.meta_via` is True, a "via" meta tag
-        will also be added, noting that the transaction was wired via paypal.
-        """
-        if txn.payee_name.startswith("PayPal"):
-            match = re.search(self.ref_paypal_regex, txn.reference)
-            if match:
-                if self.meta_via:
-                    txn.meta["via"] = "paypal"
-                txn.payee_name = match.group(1).strip()
-                txn.reference = ""
-
-    def _parse_sumup(self, txn: CsvTxn) -> None:
-        match = re.search(self.payee_sumup_regex, txn.payee_name)
-        if match:
-            if self.meta_via:
-                txn.meta["via"] = "sumup"
-            txn.payee_name = match.group(1)
-            txn.reference = ""
-
-    def _parse_amazon(self, txn: CsvTxn) -> None:
-        """Parse referece for order id and amazon name"""
-        match = re.search(self.ref_amazon_order_regex, txn.reference)
-        if match:
-            txn.meta["order_number"] = match.group(1)
-            txn.payee_name = match.group(2)
-
-    def _excluded_narration_maybe(self, txn: CsvTxn) -> None:
-        for excluded_str in self.ref_excluded_literal:
-            if excluded_str.lower() in txn.reference.lower():
-                txn.reference = ""
-                return
-
-        for excluded_regex in self.ref_excluded_regex:
-            if re.search(excluded_regex, txn.reference):
-                txn.reference = ""
-                return
-
-    def _clean(self, s: str) -> str:
-        return " ".join(s.split())
 
     def identify(self, file) -> bool:
         """Return true if this importer matches the given file.
@@ -146,35 +60,53 @@ class SparkasseCSVCAMTImporter(ImporterProtocol):
         """
         with open(file.name, encoding=self.file_encoding) as f:
             header = f.readline().strip()
-        return header.lower() == self.expected_header.lower()
+            csv_row = f.readline().strip()
+
+        expected_header = ";".join([f'"{field}"' for field in self.fields])
+
+        header_match = header == expected_header
+        iban_match = csv_row.split(";")[0].replace('"', "") == self.iban
+        return header_match and iban_match
+
+    def csv_to_txn(self, csv_row: dict[str, str]):
+        txn = TXN(
+            owner_iban=csv_row["Auftragskonto"],
+            booking_date=datetime.strptime(
+                csv_row["Buchungstag"], self.date_format
+            ).date(),  # type: ignore
+            posting_type=csv_row["Buchungstext"],
+            reference=csv_row["Verwendungszweck"],
+            payee_name=csv_row["Beguenstigter/Zahlungspflichtiger"],
+            payee_iban=csv_row["Kontonummer/IBAN"],
+            payee_bic=csv_row["BIC (SWIFT-Code)"],
+            amount=self._fmt_amount(csv_row["Betrag"]),
+            currency=csv_row["Waehrung"],
+        )
+        return txn
+
+    def _make_posting(
+        self,
+        amount: Decimal | None,
+        currency: str | None,
+        account: str | None = None,
+        flag: str | None = None,
+    ):
+        posting = Posting(
+            account=account if account else self.account,
+            units=Amount(
+                number=amount, currency=currency if currency else self.currency
+            ),
+            cost=None,
+            price=None,
+            flag=flag,
+            meta=None,
+        )
+        return posting
 
     def _make_transaction(
-        self, txn: CsvTxn, fname: str, lineno: int, flag: str
+        self, txn: TXN, fname: str, lineno: int, flag: str
     ) -> Transaction:
-        postings = [
-            Posting(
-                account=self.account,
-                units=Amount(
-                    number=txn.amount,
-                    currency=txn.currency,
-                ),
-                cost=None,
-                price=None,
-                flag=None,
-                meta=None,
-            ),
-        ]
-        if self.dummy_account:
-            postings.append(
-                Posting(
-                    account=self.dummy_account,
-                    units=None,
-                    cost=None,
-                    price=None,
-                    flag=flags.FLAG_WARNING,
-                    meta=None,
-                ),
-            )
+        postings = [self._make_posting(amount=txn.amount, currency=txn.currency)]
 
         t = Transaction(
             meta=new_metadata(filename=fname, lineno=lineno, kvlist=txn.meta),
@@ -211,47 +143,17 @@ class SparkasseCSVCAMTImporter(ImporterProtocol):
           extracted from the file.
         """
         with open(file.name, encoding=self.file_encoding) as f:
-            transactions = csv.DictReader(
-                f, fieldnames=list(self.fields.keys()), delimiter=";", quotechar='"'
-            )
+            csv_rows = csv.DictReader(f, delimiter=";", quotechar='"')
             extracted_transactions = []
-            for i, txn in enumerate(transactions):
-                if i == 0:
-                    # skip header
-                    continue
+            for i, row in enumerate(csv_rows):
 
-                # base values
-                csv_txn = CsvTxn(
-                    owner_iban=txn["account"],
-                    booking_date=datetime.strptime(
-                        txn["booking_date"], self.date_format
-                    ).date(),
-                    posting_type=txn["posting_type"],
-                    reference=txn["reference"],
-                    payee_name=txn["payee_name"],
-                    payee_iban=txn["payee_iban"],
-                    payee_bic=txn["payee_bic"],
-                    amount=self._fmt_amount(txn["amount"]),
-                    currency=txn["currency"],
-                    meta_auto_fields=self.meta_auto_fields,
-                )
-
-                # augmentation
-
-                if self.payee_sumup_regex:
-                    self._parse_sumup(txn=csv_txn)
-
-                if self.ref_paypal_regex:
-                    self._parse_paypal(txn=csv_txn)
-
-                if self.ref_amazon_order_regex:
-                    self._parse_amazon(txn=csv_txn)
-
-                self._excluded_narration_maybe(txn=csv_txn)
+                txn = self.csv_to_txn(csv_row=row)
+                for cb in self.process_callbacks:
+                    cb(txn)
 
                 extracted_transactions.append(
                     self._make_transaction(
-                        txn=csv_txn, fname=file.name, lineno=i, flag=self.FLAG
+                        txn=txn, fname=file.name, lineno=i, flag=self.FLAG
                     )
                 )
         return extracted_transactions

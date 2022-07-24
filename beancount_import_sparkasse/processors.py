@@ -7,6 +7,7 @@ import re
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from copy import deepcopy
+from decimal import Decimal
 from functools import wraps
 
 import yaml
@@ -103,9 +104,9 @@ class MetaProcessor(CSVtoTXNHook):
                     meta_value = match.group("meta")
 
             if not meta_value:
-                raise ValueError(
-                    f"rule set for {identifier=} found on depth 1,"
-                    " but no named group 'meta' found"
+                logger.warning(
+                    f"{identifier=} rule_set at level1, but no named group 'meta'"
+                    " found. Will silently ignore."
                 )
 
         elif len(split_id) == 2:
@@ -118,12 +119,16 @@ class MetaProcessor(CSVtoTXNHook):
                 "or level1=meta_value, level2=rule_set"
             )
 
-        if not key or not meta_value:
-            raise ValueError(
-                f"Something broke, sorry."
-                f"Either {key=} or {meta_value=} were not set correctly."
-            )
-        txn.meta[key] = meta_value.lower()
+        for match in matches:
+            for field in txn.__dict__:
+                if field == "meta" or field not in match.groupdict():
+                    continue
+                txn_field_value = match.group(field).strip()
+                if field == "amount":
+                    txn_field_value = Decimal(txn_field_value)
+                setattr(txn, field, txn_field_value)
+        if key and meta_value:
+            txn.meta[key] = meta_value.upper()
 
 
 def process_payee_iban(txn: TXN):

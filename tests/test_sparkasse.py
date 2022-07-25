@@ -8,17 +8,12 @@ from decimal import Decimal
 import pytest
 from tests.utils import fake_iban
 
-from beancount_import_sparkasse import giro
-
-_header_items = [f'"{field}"' for field in giro.DEFAULT_FIELDS]
-EXPECTED_HEADER = ";".join(_header_items)
-random.shuffle(_header_items)
-FALSE_HEADER = ";".join(_header_items)
+from beancount_import_sparkasse import sparkasse
 
 
-def make_csv_row(kwargs):
+def make_csv_row(fields, kwargs):
     csv_row = OrderedDict()
-    for field in giro.DEFAULT_FIELDS:
+    for field in fields:
         if field == "Betrag":
             csv_row[field] = "0,00"
         else:
@@ -30,35 +25,47 @@ def make_csv_row(kwargs):
 def csv_row_to_str(csv_row: dict[str, str]):
     return ";".join([f'"{field}"' for field in csv_row.values()])
 
+    return
+
 
 @pytest.fixture
 def csv_file(tmp_path):
     file = tmp_path / "test_file.csv"
-    file.write_text(EXPECTED_HEADER + "\n")
+    file.write_text(
+        sparkasse.CsvCamtImporter(iban="foo", account="foo").expected_header + "\n"
+    )
     return file
 
 
-@pytest.mark.parametrize(
-    "header, expected", [(EXPECTED_HEADER, True), (FALSE_HEADER, False)]
-)
-def test_identify(tmp_path, header, expected):
+def test_identify(tmp_path):
     file = tmp_path / "identify.csv"
     iban = fake_iban()
+    importer = sparkasse.CsvCamtImporter(iban=iban, account="irrelevant")
+    csv_row = csv_row_to_str(
+        make_csv_row(fields=importer.fields, kwargs={"Auftragskonto": iban})
+    )
 
-    csv_row = csv_row_to_str(make_csv_row({"Auftragskonto": iban}))
-
-    file.write_text(header + "\n" + csv_row)
-    importer = giro.SparkasseCSVCAMTImporter(iban=iban, account="irrelevant")
+    importer.expected_header
+    file.write_text(importer.expected_header + "\n" + csv_row)
     with open(file) as f:
-        assert importer.identify(f) == expected
+        assert importer.identify(f)
+
+    fields = importer.expected_header.split(importer.delimiter)
+    random.shuffle(fields)
+    unexpected_header = importer.delimiter.join(fields)
+    file.write_text(unexpected_header + "\n" + csv_row)
+    with open(file) as f:
+        assert not importer.identify(f)
 
 
 def test_extract_date(csv_file):
-    importer = giro.SparkasseCSVCAMTImporter(
+    importer = sparkasse.CsvCamtImporter(
         iban="irrelevant", account="irrelevant", file_encoding="utf-8"
     )
     booking_date = "01.01.99"
-    row = csv_row_to_str(make_csv_row({"Buchungstag": booking_date}))
+    row = csv_row_to_str(
+        make_csv_row(fields=importer.fields, kwargs={"Buchungstag": booking_date})
+    )
 
     with open(csv_file, "a") as f:
         f.write(row)
@@ -80,8 +87,12 @@ def test_csv_to_txn():
     amount = "1,23"
     currency = "EUR"
 
+    importer = sparkasse.CsvCamtImporter(
+        iban=owner_iban, account="irrelevant", date_format=date_format
+    )
     csv_row = make_csv_row(
-        {
+        fields=importer.fields,
+        kwargs={
             "Auftragskonto": owner_iban,
             "Buchungstag": booking_date,
             "Buchungstext": posting_type,
@@ -91,12 +102,9 @@ def test_csv_to_txn():
             "BIC (SWIFT-Code)": payee_bic,
             "Betrag": amount,
             "Waehrung": currency,
-        }
+        },
     )
 
-    importer = giro.SparkasseCSVCAMTImporter(
-        iban=owner_iban, account="irrelevant", date_format=date_format
-    )
     txn = importer.csv_to_txn(csv_row=csv_row)
     assert txn.owner_iban == owner_iban
     assert txn.booking_date == datetime.strptime(booking_date, date_format).date()
@@ -121,9 +129,16 @@ def test_extract(csv_file):
     amount = "1,23"
     currency = "EUR"
 
+    importer = sparkasse.CsvCamtImporter(
+        iban="irrelevant",
+        account="irrelevant",
+        file_encoding="utf-8",
+        date_format=date_format,
+    )
     csv_row = csv_row_to_str(
         make_csv_row(
-            {
+            fields=importer.fields,
+            kwargs={
                 "Auftragskonto": owner_iban,
                 "Buchungstag": booking_date,
                 "Buchungstext": posting_type,
@@ -133,19 +148,12 @@ def test_extract(csv_file):
                 "BIC (SWIFT-Code)": payee_bic,
                 "Betrag": amount,
                 "Waehrung": currency,
-            }
+            },
         )
     )
 
     with open(csv_file, "a") as f:
         f.write(csv_row)
-
-    importer = giro.SparkasseCSVCAMTImporter(
-        iban="irrelevant",
-        account="irrelevant",
-        file_encoding="utf-8",
-        date_format=date_format,
-    )
 
     with open(csv_file) as f:
         txns = importer.extract(f)

@@ -17,7 +17,7 @@ class InducedPosting:
 @dataclass
 class TXN:
     owner_iban: str
-    booking_date: datetime
+    date: datetime
     posting_type: str
     reference: str
     payee_name: str

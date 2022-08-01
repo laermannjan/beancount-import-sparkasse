@@ -16,9 +16,7 @@ from beancount.core import flags
 from beancount_import_sparkasse.importers import BaseImporter
 from beancount_import_sparkasse.models import TXN, InducedPosting
 
-logging.basicConfig(format="%(levelname)s :: %(name)s | %(message)s")
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
 
 
 class CSVtoTXNHook(ABC):
